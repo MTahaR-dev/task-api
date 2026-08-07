@@ -49,11 +49,23 @@ def health_check():
     return {"status": "ok"}
 
 
+@app.get("/stats", summary="Task statistics", tags=["Meta"])
+def get_stats():
+    """Return counts of total, completed and open tasks."""
+    done_count = sum(1 for t in tasks if t["done"])
+    return {"total": len(tasks), "done": done_count, "open": len(tasks) - done_count}
+
+
 # ---------- Tasks ----------
-@app.get("/tasks", summary="List all tasks", tags=["Tasks"])
-def list_tasks():
-    """Return every task currently held in memory."""
-    return tasks
+@app.get("/tasks", summary="List tasks, optionally filtered", tags=["Tasks"])
+def list_tasks(done: bool | None = None, search: str | None = None):
+    """List all tasks. Filter with ?done=true, or search titles with ?search=milk."""
+    result = tasks
+    if done is not None:
+        result = [t for t in result if t["done"] == done]
+    if search:
+        result = [t for t in result if search.lower() in t["title"].lower()]
+    return result
 
 
 @app.get("/tasks/{task_id}", summary="Get one task", tags=["Tasks"])

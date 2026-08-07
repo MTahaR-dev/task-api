@@ -42,7 +42,10 @@ Interactive documentation (Swagger UI): **http://localhost:8000/docs**
 |---|---|---|---|---|
 | `GET` | `/` | API name, version and available resources | `200` | — |
 | `GET` | `/health` | Liveness check | `200` | — |
+| `GET` | `/stats` | Counts of total / done / open tasks | `200` | — |
 | `GET` | `/tasks` | List all tasks | `200` | — |
+| `GET` | `/tasks?done=true` | List only finished (or unfinished) tasks | `200` | — |
+| `GET` | `/tasks?search=milk` | List tasks whose title contains the term | `200` | — |
 | `GET` | `/tasks/{id}` | Get one task by id | `200` | `404` unknown id |
 | `POST` | `/tasks` | Create a task from `{"title": "..."}` | `201` | `400` missing/empty title |
 | `PUT` | `/tasks/{id}` | Update `title` and/or `done` | `200` | `400` empty body · `404` unknown id |
@@ -74,27 +77,88 @@ Every error returns a consistent JSON body, produced by a single global exceptio
 
 > On Windows PowerShell use `curl.exe`, not `curl` — the latter is an alias for `Invoke-WebRequest`.
 
-```bash
-curl -i -X POST http://localhost:8000/tasks -H "Content-Type: application/json" -d '{"title":"Buy milk"}'
-curl -i -X PUT  http://localhost:8000/tasks/4 -H "Content-Type: application/json" -d '{"done":true}'
-curl -i http://localhost:8000/tasks
-curl -i -X DELETE http://localhost:8000/tasks/4
-curl -i http://localhost:8000/tasks/99
-```
-
-### Actual output
-
-<!-- PASTE YOUR REAL `curl -i` OUTPUT BETWEEN THE BACKTICKS BELOW -->
+Create a task, mark it done, list everything, delete it, then trigger both error paths.
+Full session below — status line, headers and body for every step.
 
 ```
+$ curl -i -X POST http://localhost:8000/tasks -H "Content-Type: application/json" -d '{"title":"Buy milk"}'
+HTTP/1.1 201 Created
+date: Fri, 07 Aug 2026 18:00:15 GMT
+server: uvicorn
+content-length: 40
+content-type: application/json
+
+{"id":4,"title":"Buy milk","done":false}
+
+
+$ curl -i -X PUT http://localhost:8000/tasks/4 -H "Content-Type: application/json" -d '{"done":true}'
 HTTP/1.1 200 OK
-date: Fri, 07 Aug 2026 17:26:49 GMT
+date: Fri, 07 Aug 2026 18:00:15 GMT
+server: uvicorn
+content-length: 39
+content-type: application/json
+
+{"id":4,"title":"Buy milk","done":true}
+
+
+$ curl -i http://localhost:8000/tasks
+HTTP/1.1 200 OK
+date: Fri, 07 Aug 2026 18:00:15 GMT
+server: uvicorn
+content-length: 157
+content-type: application/json
+
+[{"id":1,"title":"Task 1","done":false},{"id":2,"title":"Task 2","done":true},{"id":3,"title":"Task 3","done":false},{"id":4,"title":"Buy milk","done":true}]
+
+
+$ curl -i -X DELETE http://localhost:8000/tasks/4
+HTTP/1.1 204 No Content
+date: Fri, 07 Aug 2026 18:00:15 GMT
+server: uvicorn
+
+
+$ curl -i http://localhost:8000/tasks/99
+HTTP/1.1 404 Not Found
+date: Fri, 07 Aug 2026 18:00:15 GMT
 server: uvicorn
 content-length: 29
 content-type: application/json
 
 {"error":"Task 99 not found"}
+
+
+$ curl -i -X POST http://localhost:8000/tasks -H "Content-Type: application/json" -d '{}'
+HTTP/1.1 400 Bad Request
+date: Fri, 07 Aug 2026 18:00:15 GMT
+server: uvicorn
+content-length: 29
+content-type: application/json
+
+{"error":"Title is required"}
+
+
+$ curl -i "http://localhost:8000/tasks?done=true"
+HTTP/1.1 200 OK
+date: Fri, 07 Aug 2026 18:00:15 GMT
+server: uvicorn
+content-length: 39
+content-type: application/json
+
+[{"id":2,"title":"Task 2","done":true}]
+
+
+$ curl -i http://localhost:8000/stats
+HTTP/1.1 200 OK
+date: Fri, 07 Aug 2026 18:00:15 GMT
+server: uvicorn
+content-length: 29
+content-type: application/json
+
+{"total":3,"done":1,"open":2}
 ```
+
+Note the `204 No Content` response: no `content-length`, no body at all. The status code *is*
+the answer — that is what "No Content" means.
 
 ---
 
@@ -130,31 +194,14 @@ the problem a database solves, and the reason Week 3 exists.
   making it impossible to un-tick a completed task.
 - **A single `@app.exception_handler`** reshapes FastAPI's default `{"detail": ...}` into
   `{"error": ...}` for every endpoint at once, rather than hand-writing error bodies in five places.
+- **Query parameters for filtering, path parameters for identity.** `/tasks/3` addresses one
+  specific resource; `/tasks?done=true` describes a view of the collection. Mixing the two up
+  (`/tasks/done`) is a common REST design mistake.
 
 ---
 
-## AI vs me
+## Roadmap
 
-<!-- Stage 7 (bonus). Fill this in after generating an AI version in ai-version/ -->
-
-**My prompt**
-
-```
-(paste the prompt you wrote from memory here)
-```
-
-**What the AI did better**
-
--
-
-**What it got wrong or ignored**
-
--
-
-**What my prompt failed to specify**
-
--
-
-**After one rematch**
-
--
+- Week 3: replace the in-memory list with a real database so data survives a restart.
+- Bonus Stage 7 (*AI vs me*): specify this same API to an AI assistant, run its output against the
+  checkpoints above, and diff it against this hand-built version. Not yet completed.
