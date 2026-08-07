@@ -198,10 +198,3 @@ the problem a database solves, and the reason Week 3 exists.
   specific resource; `/tasks?done=true` describes a view of the collection. Mixing the two up
   (`/tasks/done`) is a common REST design mistake.
 
----
-
-## Roadmap
-
-- Week 3: replace the in-memory list with a real database so data survives a restart.
-- Bonus Stage 7 (*AI vs me*): specify this same API to an AI assistant, run its output against the
-  checkpoints above, and diff it against this hand-built version. Not yet completed.
