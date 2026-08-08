@@ -7,19 +7,10 @@ init_db()
 
 app = FastAPI(
     title="Task API",
-    description="A small in-memory CRUD API for managing a to-do list. "
-                "FlyRank Internship-Backend Track-Week 2-Assignment A1.",
+    description="A small CRUD API for managing a to-do list, backed by SQLite. "
+                "FlyRank Internship-Backend Track-Week 3-Assignment A1.",
     version="1.0",
 )
-
-# NOTE (Stage 1): reads now come from SQLite. The in-memory list below is kept
-# only until POST/PUT/DELETE are migrated in Stages 2-3, then it is deleted.
-tasks = [
-    {"id": 1, "title": "Task 1", "done": False},
-    {"id": 2, "title": "Task 2", "done": True},
-    {"id": 3, "title": "Task 3", "done": False},
-]
-
 
 # ---------- Models ----------
 class TaskCreate(BaseModel):
@@ -29,15 +20,6 @@ class TaskCreate(BaseModel):
 class TaskUpdate(BaseModel):
     title: str | None = None
     done: bool | None = None
-
-
-# ---------- Helper ----------
-def find_task(task_id: int) -> dict:
-    """Return the task with this id, or raise a 404."""
-    for task in tasks:
-        if task["id"] == task_id:
-            return task
-    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
 
 # ---------- Meta ----------
@@ -55,9 +37,17 @@ def health_check():
 
 @app.get("/stats", summary="Task statistics", tags=["Meta"])
 def get_stats():
-    """Return counts of total, completed and open tasks."""
-    done_count = sum(1 for t in tasks if t["done"])
-    return {"total": len(tasks), "done": done_count, "open": len(tasks) - done_count}
+    """Return counts of total, completed and open tasks, computed by SQL."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(done), 0) AS done FROM tasks"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    total, done = row["total"], row["done"]
+    return {"total": total, "done": done, "open": total - done}
 
 
 # ---------- Tasks ----------
@@ -129,25 +119,53 @@ def create_task(payload: TaskCreate):
 @app.put("/tasks/{task_id}", summary="Update a task", tags=["Tasks"])
 def update_task(task_id: int, payload: TaskUpdate):
     """Update a task's title and/or done flag. Send at least one field."""
-    task = find_task(task_id)
-
     if payload.title is None and payload.done is None:
         raise HTTPException(status_code=400, detail="Nothing to update: send title and/or done")
     if payload.title is not None and not payload.title.strip():
         raise HTTPException(status_code=400, detail="Title cannot be empty")
 
+    # Column names are built from our own code; values always go through ? placeholders.
+    fields = []
+    params = []
     if payload.title is not None:
-        task["title"] = payload.title.strip()
+        fields.append("title = ?")
+        params.append(payload.title.strip())
     if payload.done is not None:
-        task["done"] = payload.done
-    return task
+        fields.append("done = ?")
+        params.append(1 if payload.done else 0)
+    params.append(task_id)
+
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            f"UPDATE tasks SET {', '.join(fields)} WHERE id = ?", params
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+        row = conn.execute(
+            "SELECT id, title, done FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return row_to_task(row)
 
 
 @app.delete("/tasks/{task_id}", status_code=204, summary="Delete a task", tags=["Tasks"])
 def delete_task(task_id: int):
     """Delete a task by id. Returns 204 with an empty body on success."""
-    task = find_task(task_id)
-    tasks.remove(task)
+    conn = get_connection()
+    try:
+        cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        conn.commit()
+        deleted = cursor.rowcount
+    finally:
+        conn.close()
+
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     return None
 
 
