@@ -12,7 +12,8 @@ app = FastAPI(
     version="1.0",
 )
 
-# ---------- In-memory store (no database — data resets on restart) ----------
+# NOTE (Stage 1): reads now come from SQLite. The in-memory list below is kept
+# only until POST/PUT/DELETE are migrated in Stages 2-3, then it is deleted.
 tasks = [
     {"id": 1, "title": "Task 1", "done": False},
     {"id": 2, "title": "Task 2", "done": True},
@@ -63,18 +64,44 @@ def get_stats():
 @app.get("/tasks", summary="List tasks, optionally filtered", tags=["Tasks"])
 def list_tasks(done: bool | None = None, search: str | None = None):
     """List all tasks. Filter with ?done=true, or search titles with ?search=milk."""
-    result = tasks
+    query = "SELECT id, title, done FROM tasks"
+    conditions = []
+    params = []
+
     if done is not None:
-        result = [t for t in result if t["done"] == done]
+        conditions.append("done = ?")
+        params.append(1 if done else 0)
     if search:
-        result = [t for t in result if search.lower() in t["title"].lower()]
-    return result
+        conditions.append("title LIKE ?")
+        params.append(f"%{search}%")
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY id"
+
+    conn = get_connection()
+    try:
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    return [row_to_task(row) for row in rows]
 
 
 @app.get("/tasks/{task_id}", summary="Get one task", tags=["Tasks"])
 def get_task(task_id: int):
     """Return a single task by id. Returns 404 if no task has that id."""
-    return find_task(task_id)
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, title, done FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    return row_to_task(row)
 
 
 @app.post("/tasks", status_code=201, summary="Create a task", tags=["Tasks"])

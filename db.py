@@ -17,7 +17,15 @@ def row_to_task(row: sqlite3.Row) -> dict:
 def init_db() -> None:
     conn = get_connection()
     try:
-        conn.execute()
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT    NOT NULL,
+                done  INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
 
         count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
         if count == 0:
