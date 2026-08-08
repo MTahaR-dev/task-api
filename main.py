@@ -106,14 +106,24 @@ def get_task(task_id: int):
 
 @app.post("/tasks", status_code=201, summary="Create a task", tags=["Tasks"])
 def create_task(payload: TaskCreate):
-    """Create a task from a non-empty `title`. The server assigns the id and sets done to false."""
+    """Create a task from a non-empty `title`. The database assigns the id."""
     if not payload.title or not payload.title.strip():
         raise HTTPException(status_code=400, detail="Title is required")
 
-    new_id = (max(t["id"] for t in tasks) if tasks else 0) + 1
-    new_task = {"id": new_id, "title": payload.title.strip(), "done": False}
-    tasks.append(new_task)
-    return new_task
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO tasks (title, done) VALUES (?, ?)",
+            (payload.title.strip(), 0),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, title, done FROM tasks WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return row_to_task(row)
 
 
 @app.put("/tasks/{task_id}", summary="Update a task", tags=["Tasks"])
