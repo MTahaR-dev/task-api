@@ -10,6 +10,10 @@ __pycache__/
 # Environment variables
 .env
 
+# SQLite database (auto-created on first run)
+tasks.db
+tasks.db-journal
+
 # Editor / OS
 .vscode/
 .idea/

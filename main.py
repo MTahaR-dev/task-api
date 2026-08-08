@@ -1,6 +1,9 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from db import get_connection, row_to_task, init_db
+
+init_db()
 
 app = FastAPI(
     title="Task API",
@@ -116,3 +119,4 @@ def delete_task(task_id: int):
 def http_exception_handler(request: Request, exc: HTTPException):
     """Render every HTTPException as {"error": "..."} instead of FastAPI's default {"detail": ...}."""
     return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+
