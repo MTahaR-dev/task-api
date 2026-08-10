@@ -1,115 +1,251 @@
 # Task API
 
-A small **CRUD API** for managing a to-do list, built with **FastAPI** and backed by **SQLite**.
+A CRUD API for managing a to-do list, built with **FastAPI**, with **pluggable storage** behind a
+repository interface. Runs against **PostgreSQL in Docker** by default; a SQLite implementation is
+kept alongside it so the two can be swapped by changing one environment variable.
 
-Tasks are stored in a real database, so they survive server restarts. The API surface is
-unchanged from the in-memory version — same URLs, same request bodies, same responses, same
-status codes. Only the storage layer was replaced.
+The whole stack — application and database — starts with a single command:
+
+```bash
+docker compose up
+```
 
 > FlyRank Internship · Backend Development Track
-> Week 2 · A1 — build the CRUD API · Week 3 · A1 — connect it to a database
+> W2 A1 — build the CRUD API · W3 A1 — connect it to a database · W3 A2 — Postgres in Docker
 
 ---
 
 ## Architecture
 
 ```
-Client  ──HTTP──▶  FastAPI (main.py)  ──SQL──▶  SQLite (tasks.db)
-                        │
-                        └── db.py : connection, schema, seeding, row → dict
+                     ┌──────────────────────────┐
+  Client ──HTTP──▶   │  main.py                 │   routing · validation · status codes
+                     │  (the API layer)         │   imports no database driver
+                     └───────────┬──────────────┘
+                                 │  TaskRepository  (abstract, 6 methods)
+                     ┌───────────┴──────────────┐
+                     ▼                          ▼
+        SQLiteTaskRepository          PostgresTaskRepository
+              tasks.db                  postgres:16 in Docker
+                                        └── named volume (data survives the container)
 ```
 
-| File | Responsibility |
+| Path | Responsibility |
 |---|---|
-| `main.py` | The API layer. Routing, validation, status codes. Knows nothing about files or disks. |
-| `db.py` | The data layer. Opens connections, creates the schema, seeds first-run data, converts rows to the API's JSON shape. |
-| `tasks.db` | The database. Auto-created on first run, **not** committed to Git. |
+| `main.py` | HTTP only. Routes, Pydantic models, status codes, error shape. |
+| `repositories/base.py` | The storage contract: an abstract class with six methods. |
+| `repositories/sqlite_repo.py` | SQLite implementation (`?` placeholders, `INTEGER` booleans). |
+| `repositories/postgres_repo.py` | Postgres implementation (`%s` placeholders, native `BOOLEAN`, `RETURNING`). |
+| `repositories/__init__.py` | Factory. Reads `TASK_REPOSITORY` from `.env` and returns one implementation or the other. |
+| `init.sql` | Postgres schema + seed. Executed once by the database container on first boot. |
+| `docker-compose.yml` | The stack: `db` + `app`, a private network, a healthcheck, a volume. |
+| `Dockerfile` | How the app is built into an image. |
 
-The separation is the point of the Week 3 assignment: swapping SQLite for PostgreSQL later means
-rewriting `db.py` and leaving `main.py` almost untouched.
-
----
-
-## Why SQLite
-
-- **Zero setup.** No server process, no port, no username, no password, no Docker. The entire
-  database is one file, and the driver ships with Python's standard library — there is nothing to
-  `pip install`.
-- **Self-installing.** The app creates the file and the schema on first run, so a stranger who
-  clones this repo can run it immediately with no database step.
-- **Real SQL.** It is not a toy. SQLite speaks standard SQL, enforces constraints, and runs
-  transactions, so everything learned here transfers directly to PostgreSQL or MySQL.
-- **Genuinely everywhere.** It ships inside Android, iOS, Chrome, Firefox and macOS. It is
-  probably the most widely deployed database engine in the world.
-
-The trade-off: SQLite is a single file accessed by one process at a time, so it is a poor fit for
-a high-traffic service with many concurrent writers. That is the point at which you move to a
-client/server database — and the reason the data layer lives in its own module.
-
----
-
-## Where the database lives
-
-```
-E:\Coding\Python\task-api\tasks.db
-```
-
-The path is resolved relative to `db.py`, so it always sits next to the source regardless of
-where the server is launched from:
+`main.py` does not import `sqlite3` or `psycopg`, and contains no SQL. It asks a `TaskRepository`
+for data and translates the answers into HTTP:
 
 ```python
-DB_PATH = Path(__file__).parent / "tasks.db"
+task = repo.get_task(task_id)
+if task is None:
+    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+return task
 ```
 
-`tasks.db` is listed in `.gitignore` and is **deliberately not committed**. The schema lives in
-the code; the database is a generated artifact, like `venv/`. Cloning the repo and running the
-app rebuilds it from scratch.
+The repository reports facts — `None` for "no such row", `False` for "nothing deleted". It never
+raises `HTTPException`, because a database has no opinion about HTTP status codes. Keeping that
+boundary clean is what makes the implementations interchangeable.
 
-### Schema
+### An honest note on "routes unchanged"
 
-```sql
-CREATE TABLE IF NOT EXISTS tasks (
-    id    INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT    NOT NULL,
-    done  INTEGER NOT NULL DEFAULT 0
-);
-```
+The assignment asks for this claim to be made honestly, so precisely:
 
-`IF NOT EXISTS` makes startup idempotent — running it a hundred times creates the table once.
-Seeding is guarded separately by a `SELECT COUNT(*)`, so the three example tasks are inserted
-only when the table is empty, not on every boot.
+- **`main.py` did change once**, when the storage layer was extracted. Route bodies that previously
+  opened SQLite connections and ran SQL inline were rewritten to call `repo.*` methods. That was the
+  refactor, and it is a real diff.
+- **After that refactor, switching SQLite → Postgres required zero changes to `main.py`.** The
+  Postgres repository was written as a new file, and the swap was performed by editing one line in
+  `.env` (`TASK_REPOSITORY=sqlite` → `postgres`). Routes, request bodies, responses and status codes
+  are byte-identical across both backends.
 
-SQLite has no boolean type, so `done` is stored as `1` / `0`. `db.row_to_task()` converts it back
-to a real boolean, which is why the API still returns `"done": false` and not `"done": 0`.
+So the layering does pay off as advertised — but the payment was made up front, in the refactor,
+not for free.
 
 ---
 
-## Requirements
+## Quick start
 
-- Python 3.10+
-- Git
-
-## Install & run
+**Requirements:** Docker Desktop. Nothing else — no local Python, no local Postgres.
 
 ```bash
 git clone https://github.com/MTahaR-dev/task-api.git
 cd task-api
 
-python -m venv venv
-# Windows
-venv\Scripts\activate
-# macOS / Linux
-source venv/bin/activate
+copy .env.example .env        # Windows   (cp .env.example .env on macOS/Linux)
 
+docker compose up
+```
+
+- API: **http://localhost:8000**
+- Interactive docs (Swagger UI): **http://localhost:8000/docs**
+- Postgres: **localhost:5432** (`taskuser` / see your `.env`)
+
+On first boot the database container creates the `tasks` table from `init.sql` and inserts three
+example rows. Confirm which backend is live at any time:
+
+```bash
+curl http://localhost:8000/
+# {"name":"Task API","version":"2.0","storage":"postgres","endpoints":["/tasks"]}
+```
+
+### Useful commands
+
+| Command | What it does |
+|---|---|
+| `docker compose up -d` | start in the background |
+| `docker compose logs -f app` | follow the app's logs |
+| `docker compose ps` | what is running |
+| `docker compose down` | stop and delete the containers — **keeps the data** |
+| `docker compose down -v` | also delete the volume — **destroys the data** |
+| `docker compose exec db psql -U taskuser -d taskdb` | a SQL shell inside the database container |
+
+### Running without Docker
+
+Set `TASK_REPOSITORY=sqlite` in `.env` and run it directly. No database server needed:
+
+```bash
+python -m venv venv && venv\Scripts\activate
 pip install -r requirements.txt
 fastapi dev main.py
 ```
 
-That is the whole setup. On first launch the app creates `tasks.db`, builds the `tasks` table and
-inserts three example tasks.
+---
 
-- API: **http://localhost:8000**
-- Interactive docs (Swagger UI): **http://localhost:8000/docs**
+## Configuration
+
+All configuration comes from environment variables, loaded from `.env` via `python-dotenv`.
+
+**`.env` is gitignored.** `.env.example` is committed as the template, so anyone cloning the repo
+can see exactly which variables are required without ever receiving a real credential.
+
+| Variable | Purpose |
+|---|---|
+| `TASK_REPOSITORY` | `sqlite` or `postgres` — chooses the implementation at startup |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | used by the `db` container to create the database on first boot |
+| `DATABASE_URL` | connection string used by the Postgres repository |
+
+One detail worth knowing: `DATABASE_URL` in `.env` points at `localhost`, for running the app on
+your own machine against the container. `docker-compose.yml` **overrides** it for the app container
+with the host `db` — inside a compose network, every service is reachable by its service name, and
+`localhost` would mean the app container itself.
+
+---
+
+## The database
+
+**Image:** `postgres:16-alpine`
+**Volume:** `task-api_postgres_data` → `/var/lib/postgresql/data`
+
+The volume is the reason data survives. Containers are disposable — `docker compose down` deletes
+them entirely — but a named volume is a separate object with its own lifecycle, and is only removed
+when explicitly asked (`down -v`).
+
+### Schema — `init.sql`
+
+```sql
+CREATE TABLE IF NOT EXISTS tasks (
+    id    SERIAL  PRIMARY KEY,
+    title TEXT    NOT NULL,
+    done  BOOLEAN NOT NULL DEFAULT FALSE
+);
+```
+
+Docker runs every `.sql` file in `/docker-entrypoint-initdb.d/` exactly once: on the first start of
+a container whose data volume is empty. It does not run on later starts, so it can never overwrite
+existing data. The seed insert is additionally guarded with `WHERE NOT EXISTS (SELECT 1 FROM tasks)`
+so that even a forced re-run cannot create duplicates.
+
+The app also calls an idempotent `init_schema()` at startup. In compose this is a no-op, since
+`init.sql` already did the work; it exists so the app still works when pointed at a manually created
+database.
+
+### SQLite vs Postgres — what actually differed
+
+Only dialect, never logic. The two repository classes have identical method signatures and return
+identical dictionaries.
+
+| | SQLite | Postgres |
+|---|---|---|
+| Placeholder | `?` | `%s` |
+| Auto id | `INTEGER PRIMARY KEY AUTOINCREMENT` | `SERIAL PRIMARY KEY` |
+| Booleans | none — stored as `1`/`0`, converted in Python | native `BOOLEAN` |
+| Id of a new row | `cursor.lastrowid` | `INSERT ... RETURNING id, title, done` |
+| Case-insensitive search | `LIKE` (already insensitive for ASCII) | `ILIKE` |
+| Conditional count | `COALESCE(SUM(done), 0)` | `COUNT(*) FILTER (WHERE done)` |
+
+Postgres having a real boolean type removed the `bool()` conversion the SQLite version needs, and
+`RETURNING` collapsed insert-then-select into a single round trip.
+
+---
+
+## Persistence proof
+
+Verified by creating a row, **deleting both containers**, recreating them, and reading the row back.
+
+**1 — create a task**
+
+```
+E:\Coding\Python\task-api>curl -i -X POST http://localhost:8000/tasks -H "Content-Type: application/json" -d "{\"title\":\"Survives restart\"}"
+HTTP/1.1 201 Created
+date: Mon, 10 Aug 2026 23:13:25 GMT
+server: uvicorn
+content-length: 48
+content-type: application/json
+
+{"id":4,"title":"Survives restart","done":false}
+```
+
+**2 — destroy the containers**
+
+```
+E:\Coding\Python\task-api>docker compose down
+[+] down 3/3
+ ✔ Container task-api-app   Removed                                     0.4s
+ ✔ Container task-api-db    Removed                                     0.3s
+ ✔ Network task-api_default Removed                                     0.2s
+```
+
+**3 — confirm nothing is running, but the volume remains**
+
+```
+E:\Coding\Python\task-api>docker compose ps
+NAME      IMAGE     COMMAND   SERVICE   CREATED   STATUS    PORTS
+
+E:\Coding\Python\task-api>docker volume ls
+DRIVER    VOLUME NAME
+local     task-api_postgres_data
+```
+
+**4 — bring the stack back**
+
+```
+E:\Coding\Python\task-api>docker compose up -d
+[+] up 3/3
+ ✔ Network task-api_default Created                                     0.0s
+ ✔ Container task-api-db    Healthy                                     6.2s
+ ✔ Container task-api-app   Started                                     6.3s
+```
+
+**5 — the row is still there**
+
+```
+E:\Coding\Python\task-api>curl http://localhost:8000/tasks
+[{"id":1,"title":"Task 1","done":false},{"id":2,"title":"Task 2","done":true},{"id":3,"title":"Task 3","done":false},{"id":4,"title":"Survives restart","done":false}]
+```
+
+The database container that originally stored `"Survives restart"` no longer exists — it was removed
+in step 2 and a brand new one was created in step 4. The data survived because it lives in the
+volume, not in the container. Note also that `init.sql` did **not** re-run on the second boot: the
+volume was no longer empty, so Postgres skipped it and left the four rows alone.
 
 ---
 
@@ -117,32 +253,24 @@ inserts three example tasks.
 
 | Method | Path | Description | Success | Errors |
 |---|---|---|---|---|
-| `GET` | `/` | API name, version and available resources | `200` | — |
+| `GET` | `/` | API name, version, **active storage backend**, resources | `200` | — |
 | `GET` | `/health` | Liveness check | `200` | — |
-| `GET` | `/stats` | Counts of total / done / open, via SQL `COUNT` and `SUM` | `200` | — |
+| `GET` | `/stats` | Counts of total / done / open, computed by SQL | `200` | — |
 | `GET` | `/tasks` | List all tasks | `200` | — |
-| `GET` | `/tasks?done=true` | Filter by completion, via SQL `WHERE` | `200` | — |
-| `GET` | `/tasks?search=milk` | Search titles, via SQL `LIKE` | `200` | — |
-| `GET` | `/tasks/{id}` | Get one task by id | `200` | `404` unknown id |
-| `POST` | `/tasks` | Create a task from `{"title": "..."}` | `201` | `400` missing/empty title |
+| `GET` | `/tasks?done=true` | Filter by completion (`WHERE`) | `200` | — |
+| `GET` | `/tasks?search=milk` | Search titles (`LIKE` / `ILIKE`) | `200` | — |
+| `GET` | `/tasks/{id}` | Get one task | `200` | `404` unknown id |
+| `POST` | `/tasks` | Create from `{"title": "..."}` | `201` | `400` missing/empty title |
 | `PUT` | `/tasks/{id}` | Update `title` and/or `done` | `200` | `400` empty body · `404` unknown id |
 | `DELETE` | `/tasks/{id}` | Delete a task | `204` (empty body) | `404` unknown id |
 
-### Task shape
+**Task shape**
 
 ```json
 { "id": 1, "title": "Buy milk", "done": false }
 ```
 
-| Field | Type | Notes |
-|---|---|---|
-| `id` | integer | Assigned by the database via `AUTOINCREMENT`, never by the client |
-| `title` | string | Required on create, must not be blank |
-| `done` | boolean | Always `false` on create · stored as `1`/`0` in SQLite |
-
-### Error shape
-
-Every error returns a consistent JSON body, produced by a single global exception handler:
+**Error shape** — one global exception handler gives every endpoint the same error body:
 
 ```json
 { "error": "Task 99 not found" }
@@ -150,193 +278,64 @@ Every error returns a consistent JSON body, produced by a single global exceptio
 
 ---
 
-## Persistence
-
-The behaviour that changed between Week 2 and Week 3:
-
-```bash
-# create a task
-curl -i -X POST http://localhost:8000/tasks -H "Content-Type: application/json" -d '{"title":"Gym"}'
-
-# stop the server with Ctrl+C, then start it again
-fastapi dev main.py
-
-curl -i http://localhost:8000/tasks     # "Gym" is still there
-```
-
-Previously `tasks` was a Python list in RAM; when the process ended its memory was released and
-the list was rebuilt from its literal definition on the next start. Now every write goes to
-`tasks.db` on disk inside a committed transaction, so the process can die without taking the data
-with it.
-
-Note that the three example tasks are **not** re-inserted on restart. The seed is guarded by a
-row count, so it only fires against an empty table.
-
----
-
-## Example: full CRUD cycle with curl
-
-> On Windows PowerShell use `curl.exe`, not `curl` — the latter is an alias for `Invoke-WebRequest`.
-
-```
-$ curl -i -X POST http://localhost:8000/tasks -H "Content-Type: application/json" -d '{"title":"Buy milk"}'
-HTTP/1.1 201 Created
-date: Sat, 08 Aug 2026 19:50:03 GMT
-server: uvicorn
-content-length: 40
-content-type: application/json
-
-{"id":4,"title":"Buy milk","done":false}
-
-
-$ curl -i -X PUT http://localhost:8000/tasks/4 -H "Content-Type: application/json" -d '{"done":true}'
-HTTP/1.1 200 OK
-date: Sat, 08 Aug 2026 19:50:03 GMT
-server: uvicorn
-content-length: 39
-content-type: application/json
-
-{"id":4,"title":"Buy milk","done":true}
-
-
-$ curl -i http://localhost:8000/tasks
-HTTP/1.1 200 OK
-date: Sat, 08 Aug 2026 19:50:03 GMT
-server: uvicorn
-content-length: 157
-content-type: application/json
-
-[{"id":1,"title":"Task 1","done":false},{"id":2,"title":"Task 2","done":true},{"id":3,"title":"Task 3","done":false},{"id":4,"title":"Buy milk","done":true}]
-
-
-$ curl -i -X DELETE http://localhost:8000/tasks/4
-HTTP/1.1 204 No Content
-date: Sat, 08 Aug 2026 19:50:03 GMT
-server: uvicorn
-
-
-$ curl -i http://localhost:8000/tasks/99
-HTTP/1.1 404 Not Found
-date: Sat, 08 Aug 2026 19:50:03 GMT
-server: uvicorn
-content-length: 29
-content-type: application/json
-
-{"error":"Task 99 not found"}
-
-
-$ curl -i -X POST http://localhost:8000/tasks -H "Content-Type: application/json" -d '{}'
-HTTP/1.1 400 Bad Request
-date: Sat, 08 Aug 2026 19:50:03 GMT
-server: uvicorn
-content-length: 29
-content-type: application/json
-
-{"error":"Title is required"}
-
-
-$ curl -i "http://localhost:8000/tasks?done=true"
-HTTP/1.1 200 OK
-date: Sat, 08 Aug 2026 19:50:03 GMT
-server: uvicorn
-content-length: 39
-content-type: application/json
-
-[{"id":2,"title":"Task 2","done":true}]
-
-
-$ curl -i http://localhost:8000/stats
-HTTP/1.1 200 OK
-date: Sat, 08 Aug 2026 19:50:03 GMT
-server: uvicorn
-content-length: 29
-content-type: application/json
-
-{"total":3,"done":1,"open":2}
-```
-
-**This output is byte-for-byte identical to the in-memory version's**, which is the entire point
-of the assignment: persistence is an implementation detail hidden behind the API.
-
-Note the `204 No Content` response — no `content-length`, no body at all. The status code *is*
-the answer.
-
----
-
 ## Swagger UI
-
-Every endpoint is documented and executable at `/docs`. FastAPI generates the OpenAPI spec
-directly from the route decorators and type hints — no spec file is written by hand.
 
 ![Swagger UI](swaggerUI.PNG)
 
----
+## Exploring the SQLite database directly
 
-## Exploring the database directly
-
-Opened `tasks.db` in [DB Browser for SQLite](https://sqlitebrowser.org/) and ran queries by hand
-against the same file the API uses.
+From the previous assignment — `tasks.db` opened in DB Browser for SQLite and queried by hand.
 
 ![DB Browser for SQLite](Database.PNG)
 
-### Queries executed
-
 ```sql
--- every task (what GET /tasks runs)
 SELECT * FROM tasks;
-
--- only completed tasks (what GET /tasks?done=true runs)
 SELECT * FROM tasks WHERE done = 1;
-
--- how many tasks exist (what GET /stats runs)
 SELECT COUNT(*) FROM tasks;
-
--- mark everything complete
 UPDATE tasks SET done = 1;
-
--- remove everything complete
 DELETE FROM tasks WHERE done = 1;
 ```
 
-Running the `UPDATE` and then refreshing `GET /tasks` changes the API's response with no code
-change and no restart. The database is the source of truth; the API is one client of it among
-many possible others.
+The equivalent inside the Postgres container:
 
-> `UPDATE` and `DELETE` without a `WHERE` clause affect **every row**, with no confirmation and no
-> undo. The safe habit is to write the statement as a `SELECT` first, confirm it returns exactly
-> the rows intended, then swap in the destructive verb.
+```bash
+docker compose exec db psql -U taskuser -d taskdb
+taskdb=# SELECT * FROM tasks;
+```
 
 ---
 
 ## Notes on design decisions
 
-- **Raw `sqlite3` rather than an ORM.** The assignment asks for CRUD operations expressed as SQL
-  queries, and writing them by hand makes the mapping between HTTP verbs and SQL statements
-  explicit: `POST`→`INSERT`, `GET`→`SELECT`, `PUT`→`UPDATE`, `DELETE`→`DELETE`.
-- **Every value passes through a `?` placeholder.** Interpolating user input into a SQL string
-  with an f-string would allow SQL injection. The one f-string in `update_task` builds only
-  *column names*, all of which come from this codebase; the *values* still travel as bound
-  parameters.
-- **Ids come from `AUTOINCREMENT` and `cursor.lastrowid`**, not from `max(id) + 1` in Python.
-  Computing ids in application code has a race condition — two simultaneous requests can read the
-  same maximum and claim the same id. The database assigns them atomically.
-- **`cursor.rowcount` drives the 404s** on `PUT` and `DELETE`. A row count of zero means nothing
-  matched, which detects a missing id in a single query rather than a separate `SELECT` first.
-- **`title` is declared optional in the Pydantic model**, then validated by hand. Declaring it
-  required would make FastAPI return `422 Unprocessable Entity`, but the assignment specifies
-  `400 Bad Request`, so validation is explicit in order to control the status code.
-- **`PUT` uses `is not None` checks**, not truthiness. `if payload.done:` would ignore `false`,
-  making it impossible to un-tick a completed task.
-- **A single `@app.exception_handler`** reshapes FastAPI's default `{"detail": ...}` into
-  `{"error": ...}` for every endpoint at once, rather than hand-writing error bodies in five places.
-- **Query parameters for filtering, path parameters for identity.** `/tasks/3` addresses one
-  specific resource; `/tasks?done=true` describes a view of the collection.
+- **Abstract base class rather than a Protocol** for `TaskRepository`. Both express the contract, but
+  inheriting from `ABC` makes Python refuse to instantiate an implementation that forgets a method —
+  the error arrives at import time rather than as a `404` at 2am.
+- **No `HTTPException` in the repository layer.** Repositories return `None` / `False`; `main.py`
+  turns those into status codes. Otherwise the data layer would be unusable from a CLI, a worker, or
+  a test.
+- **Every value passes through a placeholder** (`?` / `%s`). The single f-string in each
+  `update_task` assembles only *column names*, all of which originate in this codebase; the values
+  always travel as bound parameters. That is the line between dynamic SQL and SQL injection.
+- **Ids are assigned by the database**, via `AUTOINCREMENT` / `SERIAL`, not computed in Python.
+  `max(id) + 1` has a race condition: two concurrent requests can read the same maximum.
+- **`depends_on: condition: service_healthy`** rather than plain `depends_on`. Postgres accepts TCP
+  connections a second or two before it can answer queries, so without the healthcheck the app
+  starts too early and crashes on its first connection.
+- **`--host 0.0.0.0` in the Dockerfile.** Inside a container, `127.0.0.1` means "this container
+  only" and the published port would never reach the app.
+- **Dependencies are copied and installed before the source code** in the Dockerfile, so editing
+  `main.py` reuses the cached dependency layer instead of reinstalling 45 packages.
+- **`title` is optional in the Pydantic model**, then validated by hand, because a required field
+  would make FastAPI answer `422` where the specification calls for `400`.
+- **`PUT` uses `is not None` checks**, not truthiness — `if payload.done:` would ignore `false` and
+  make it impossible to un-tick a task.
 
 ---
 
 ## Roadmap
 
+- Add Redis to the compose file for caching and background jobs (W4).
+- Add an index on `title` and compare `EXPLAIN ANALYZE` before and after on a seeded table.
 - Add `created_at` / `updated_at` timestamps.
-- Move from SQLite to PostgreSQL — this should require changes to `db.py` only.
-- Bonus Stage 7 (*AI vs me*): specify this same API to an AI assistant, run its output against the
-  checkpoints above, and diff it against this hand-built version. Not yet completed.
+- Bonus Stage 7 (*AI vs me*): specify this API to an AI assistant, run its output against these
+  checkpoints, and diff it against the hand-built version. Not yet completed.
