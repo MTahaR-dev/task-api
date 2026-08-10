@@ -268,7 +268,7 @@ the answer.
 Every endpoint is documented and executable at `/docs`. FastAPI generates the OpenAPI spec
 directly from the route decorators and type hints — no spec file is written by hand.
 
-![Swagger UI](swagger.png)
+![Swagger UI](swaggerUI.PNG)
 
 ---
 

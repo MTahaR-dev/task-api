@@ -1,0 +1,11 @@
+# Keep these out of the image: they make builds slow, and .env would bake secrets in.
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.git/
+.gitignore
+.env
+tasks.db
+*.png
+README.md

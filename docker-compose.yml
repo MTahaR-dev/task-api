@@ -1,0 +1,47 @@
+# The whole stack in one file. `docker compose up` starts both services, puts them on
+# a shared private network, and wires the app to the database.
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: task-api-db
+    restart: unless-stopped
+    environment:
+      # On first boot, the official Postgres image creates this user and database.
+      POSTGRES_USER: ${POSTGRES_USER:-taskuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskpass}
+      POSTGRES_DB: ${POSTGRES_DB:-taskdb}
+    ports:
+      # host:container -- exposed so DB tools (psql, DBeaver, pgAdmin) can reach it
+      - "5432:5432"
+    volumes:
+      # Named volume: this is what makes the data outlive the container.
+      # Deleting the container does NOT delete this.
+      - postgres_data:/var/lib/postgresql/data
+      # Anything in this directory runs once, on first boot with an empty volume.
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      # Postgres accepts TCP connections a second or two before it is ready to answer
+      # queries. Without this check the app would start too early and crash.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taskuser} -d ${POSTGRES_DB:-taskdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    container_name: task-api-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy   # wait for the healthcheck, not just for startup
+    environment:
+      TASK_REPOSITORY: postgres
+      # Note the host is "db", not localhost. Inside the compose network every service
+      # is reachable by its own name; "localhost" would mean the app container itself.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-taskuser}:${POSTGRES_PASSWORD:-taskpass}@db:5432/${POSTGRES_DB:-taskdb}
+    ports:
+      - "8000:8000"
+
+volumes:
+  postgres_data:

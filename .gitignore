@@ -7,7 +7,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Environment variables
+# Environment variables / secrets  (.env.example IS committed)
 .env
 
 # SQLite database (auto-created on first run)
